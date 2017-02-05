@@ -6,23 +6,25 @@ import gi
 from gi.repository import GstPbutils
 
 gi.require_version('Gst', '1.0')
-from gi.repository import GObject, Gst, Gtk
+gi.require_version('Gtk', '3.0')
+gi.require_version('GdkX11', '3.0')
+gi.require_version('GstVideo', '1.0')
+from gi.repository import GObject, Gst, Gtk, GdkX11, GstVideo, GLib
 import random
 import time
 
 # Needed for window.get_xid(), xvimagesink.set_window_handle(), respectively:
-from gi.repository import GdkX11, GstVideo
+
 
 GObject.threads_init()
 Gst.init(None)
-filename = "/home/baum/01_Home/02_Entwicklung/10_Python/OTRVerwaltung3Plus/Big_Buck_Bunny_12.09.30_02-25_osf_10_TVOON_DE.mpg.HQ.avi"
+filename = "/home/baum/Videos/test/Big_Buck_Bunny_12.09.30_02-25_osf_10_TVOON_DE.mpg.HQ.avi"
 uri = 'file://' + filename
-
 
 class Player(object):
     def __init__(self):
         self.marker_a, self.marker_b = 0, -1
-        self.timelines = [ [] ]
+        self.timelines = [[]]
         self.cut_selected = -1
         self.timer = None
         self.hide_cuts = False
@@ -31,6 +33,7 @@ class Player(object):
         self.keyframes = None
         self.videolength = 0
 
+        self.getVideoLength = True
 
         self.builder = Gtk.Builder()
         self.builder.add_from_file("video.glade")
@@ -41,6 +44,10 @@ class Player(object):
         self.window.set_default_size(800, 450)
 
         self.drawingarea = self.builder.get_object("drawingarea1")
+
+
+        self.drawingarea.connect('realize', self.on_realize)
+        self.drawingarea.connect('unrealize', self.on_unrealize)
 
         # Create GStreamer pipeline
         self.pipeline = Gst.Pipeline()
@@ -76,24 +83,33 @@ class Player(object):
             self.framerate_denom = vinfo.get_framerate_denom()
             print(vinfo.get_caps().to_string().replace(', ', '\n\t'))
 
-
         # Slider
 
         self.slider = self.builder.get_object("scale1")
 
+    def on_realize(self, widget, data=None):
+        print("on_realize")
 
-    def get_cuts_in_frames(self, cuts, in_frames):
-        if cuts == []:
-            res = [ (0, self.frames) ]
-        elif in_frames:
-            res = cuts
-        else:
-            res = []
-            for start, duration in cuts:
-                start_frame = int(start * self.framerate_num / self.framerate_denom)
-                duration_frames = int(duration * self.framerate_num / self.framerate_denom)
-                res.append((start_frame,duration_frames))
-        return res
+        window = widget.get_window()
+        self.xid = window.get_xid()
+        self.playbin.set_window_handle(self.xid)
+
+    def on_draw(self, widget, cr):
+        print("ondraw", self.playbin.get_state(0).state)
+        if self.playbin.get_state(0).state < Gst.State.PAUSED:
+            allocation = widget.get_allocation()
+
+            cr.set_source_rgb(0, 0, 0)
+            cr.rectangle(0, 0, allocation.width, allocation.height)
+            cr.fill()
+
+        self.on_realize(widget)
+
+
+    def on_unrealize(self, widget, data=None):
+        # to prevent racing conditions when closing the window while playing
+        self.playbin.set_state(Gst.State.NULL)
+
 
 
     def run(self):
@@ -102,6 +118,7 @@ class Player(object):
         # in the on_sync_message() handler because threading issues will cause
         # segfaults there.
         self.xid = self.drawingarea.get_property('window').get_xid()
+        print(self.xid)
         Gtk.main()
 
     def quit(self, window):
@@ -112,14 +129,19 @@ class Player(object):
         if msg.get_structure().get_name() == 'prepare-window-handle':
             print('prepare-window-handle')
             msg.src.set_window_handle(self.xid)
+            #print(msg.src.set_window_handle(self.xid))
+            print(msg)
+            print(msg.get_structure())
 
     def on_message(self, bus, message):
         t = message.type
         if t == Gst.MessageType.ASYNC_DONE:
-            print('Async done')
-            self.videolength = self.playbin.query_duration(Gst.Format.TIME)
-            self.frames = self.videolength[1] * self.framerate_num / self.framerate_denom / Gst.SECOND
-            self.slider.set_range(0, self.get_frames())
+            if self.getVideoLength is True:
+                self.getVideoLength = False
+                print('Async done')
+                self.videolength = self.playbin.query_duration(Gst.Format.TIME)
+                self.frames = self.videolength[1] * self.framerate_num / self.framerate_denom / Gst.SECOND
+                self.slider.set_range(0, self.get_frames())
 
     def on_eos(self, bus, msg):
         print('on_eos(): seeking to start of video')
@@ -169,7 +191,7 @@ class Player(object):
         self.jump_relative(1)
 
     def on_valueChanged(self, range):
-        #print("value changed")
+        # print("value changed")
 
         frames = self.slider.get_value()
         self.slider.set_fill_level(frames)
@@ -177,17 +199,16 @@ class Player(object):
         if frames >= self.get_frames():
             print("restrict")
             frames = self.get_frames() - 1
-        self.playbin.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, frames * Gst.SECOND * self.framerate_denom / self.framerate_num)
+        self.playbin.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                                 frames * Gst.SECOND * self.framerate_denom / self.framerate_num)
 
-
-
-    def jump_relative(self, frames, flags = Gst.SeekFlags.ACCURATE):
+    def jump_relative(self, frames, flags=Gst.SeekFlags.ACCURATE):
         try:
             nano_seconds = self.playbin.query_position(Gst.Format.TIME)[1]
 
 
         except Exception as e:
-            #time.sleep(0.04)
+            # time.sleep(0.04)
             nano_seconds = self.playbin.query_position(Gst.Format.TIME)[1]
 
         print("act pos: ", nano_seconds, " ns")
@@ -203,10 +224,10 @@ class Player(object):
 
         self.jump_to(nanoseconds=nano_seconds, flags=flags)
 
-    def jump_to(self, frames=None, seconds=None, nanoseconds=0, flags = Gst.SeekFlags.ACCURATE):
+    def jump_to(self, frames=None, seconds=None, nanoseconds=0, flags=Gst.SeekFlags.ACCURATE):
         if frames:
             if frames >= self.get_frames():
-                frames = self.get_frames()-1
+                frames = self.get_frames() - 1
 
             nanoseconds = frames * Gst.SECOND * self.framerate_denom / self.framerate_num
         elif seconds:
@@ -223,5 +244,9 @@ class Player(object):
 
         return frames
 
+
+
 p = Player()
 p.run()
+
+
