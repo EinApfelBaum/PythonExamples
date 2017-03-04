@@ -24,3 +24,4 @@ if char is ':':
 
 i = line.find('\n')
 print(i)
+
